@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+
+# linst: Linux Distribution Helper - скачивание и запись дистрибутивов на флешку
+# Версия: 2.0.0
+# Автор: Раф
+# Требования: bash, sudo, lsblk, dd, ventoy (опционально), fzf (опционально), jq, curl/wget
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# ====== Конфигурация ======
+MOUNT_BASE="/mnt/linst"
+CONFIG_FILE="${BASH_SOURCE%/*}/distros.json"
+DOWNLOAD_DIR="${HOME}/Downloads"
+# ==========================
+
+# Проверка зависимостей
+check_dependencies() {
+    local deps=("jq" "lsblk" "dd")
+    local missing=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Ошибка: отсутствуют зависимости: ${missing[*]}" >&2
+        echo "Установите их с помощью пакетного менеджера системы" >&2
+        exit 1
+    fi
+    
+    # Проверка наличия curl или wget
+    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+        echo "Ошибка: требуется curl или wget для скачивания ISO" >&2
+        exit 1
+    fi
+}
+
+# Вывод справки
+print_help() {
+    cat <<-EOF
+Usage: linst [options]
+
+Опции:
+  -h, --help         Показать это сообщение
+  -i, --iso PATH     Использовать локальный ISO-образ
+  -d, --device DEV   Устройство (например sdd или /dev/sdd)
+  -m, --method M     Метод записи: dd или ventoy
+  --no-confirm       Отключить интерактивное подтверждение
+  --list-distros     Показать список доступных дистрибутивов
+  --download-only    Только скачать ISO, не записывать
+
+Примеры:
+  linst                          # Интерактивный режим
+  linst -i ~/Downloads/arch.iso  # Использовать локальный ISO
+  linst --list-distros           # Показать доступные дистрибутивы
+EOF
+}
+
+# Загрузка конфигурации дистрибутивов
+load_distros_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "Ошибка: файл конфигурации $CONFIG_FILE не найден" >&2
+        exit 1
+    fi
+    
+    if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        echo "Ошибка: некорректный JSON в $CONFIG_FILE" >&2
+        exit 1
+    fi
+}
+
+# Показать список доступных дистрибутивов
+list_distros() {
+    echo "Доступные дистрибутивы:"
+    echo
+    
+    jq -r '.distros | to_entries[] | "\(.key): \(.value.name)"' "$CONFIG_FILE" | \
+    while IFS=': ' read -r key name; do
+        printf "  %-15s %s\n" "$key" "$name"
+    done
+}
+
+# Подтверждение с дефолтом Yes
+confirm() {
+    local prompt="${1:-Продолжить?} [Y/n]: "
+    local answer
+    
+    read -rp "$prompt" answer || return 1
+    [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]
+}
+
+# Список устройств и выбор
+choose_device() {
+    local list
+    list=$(lsblk -d -o NAME,SIZE,LABEL,MODEL | grep '^sd' || true)
+    
+    if [[ -z "$list" ]]; then
+        echo "Нет доступных устройств" >&2
+        return 1
+    fi
+    
+    if command -v fzf &>/dev/null; then
+        echo "$list" | fzf --header="Выберите устройство для записи" --preview="echo {}" | \
+            awk '{print $1}'
+    else
+        echo "Доступные устройства:"
+        echo "$list"
+        echo
+        read -rp "Введите имя устройства (например sdd): " dev
+        echo "$dev"
+    fi
+}
+
+# Выбор дистрибутива
+choose_distro() {
+    local distros
+    distros=$(jq -r '.distros | keys[]' "$CONFIG_FILE")
+    
+    if command -v fzf &>/dev/null; then
+        echo "$distros" | fzf --header="Выберите дистрибутив" --preview="jq -r '.distros.{}.name' '$CONFIG_FILE'"
+    else
+        echo "Доступные дистрибутивы:"
+        local i=1
+        declare -A distro_map
+        
+        while IFS= read -r distro; do
+            local name
+            name=$(jq -r ".distros.$distro.name" "$CONFIG_FILE")
+            printf "%2d) %s\n" "$i" "$name"
+            distro_map[$i]="$distro"
+            ((i++))
+        done <<< "$distros"
+        
+        echo
+        read -rp "Выберите номер дистрибутива: " choice
+        
+        if [[ -n "${distro_map[$choice]:-}" ]]; then
+            echo "${distro_map[$choice]}"
+        else
+            echo "Неверный выбор" >&2
+            return 1
+        fi
+    fi
+}
+
+# Выбор версии дистрибутива
+choose_version() {
+    local distro="$1"
+    local versions
+    versions=$(jq -r ".distros.$distro.versions | keys[]" "$CONFIG_FILE")
+    
+    if [[ $(echo "$versions" | wc -l) -eq 1 ]]; then
+        echo "$versions"
+        return
+    fi
+    
+    if command -v fzf &>/dev/null; then
+        echo "$versions" | fzf --header="Выберите версию $distro" --preview="jq -r '.distros.$distro.versions.{}.description' '$CONFIG_FILE'"
+    else
+        echo "Доступные версии для $distro:"
+        local i=1
+        declare -A version_map
+        
+        while IFS= read -r version; do
+            local desc
+            desc=$(jq -r ".distros.$distro.versions.$version.description" "$CONFIG_FILE")
+            printf "%2d) %s\n" "$i" "$desc"
+            version_map[$i]="$version"
+            ((i++))
+        done <<< "$versions"
+        
+        echo
+        read -rp "Выберите номер версии: " choice
+        
+        if [[ -n "${version_map[$choice]:-}" ]]; then
+            echo "${version_map[$choice]}"
+        else
+            echo "Неверный выбор" >&2
+            return 1
+        fi
+    fi
+}
+
+# Выбор рабочего стола (DE)
+choose_desktop_environment() {
+    local distro="$1"
+    local version="$2"
+    
+    # Проверяем, есть ли desktop_environments
+    if ! jq -e ".distros.$distro.versions.$version.desktop_environments" "$CONFIG_FILE" &>/dev/null; then
+        return 0  # Нет выбора DE
+    fi
+    
+    local des
+    des=$(jq -r ".distros.$distro.versions.$version.desktop_environments | keys[]" "$CONFIG_FILE")
+    
+    if command -v fzf &>/dev/null; then
+        echo "$des" | fzf --header="Выберите рабочий стол" --preview="jq -r '.distros.$distro.versions.$version.desktop_environments.{}.description' '$CONFIG_FILE'"
+    else
+        echo "Доступные рабочие столы:"
+        local i=1
+        declare -A de_map
+        
+        while IFS= read -r de; do
+            local desc
+            desc=$(jq -r ".distros.$distro.versions.$version.desktop_environments.$de.description" "$CONFIG_FILE")
+            printf "%2d) %s\n" "$i" "$desc"
+            de_map[$i]="$de"
+            ((i++))
+        done <<< "$des"
+        
+        echo
+        read -rp "Выберите номер рабочего стола: " choice
+        
+        if [[ -n "${de_map[$choice]:-}" ]]; then
+            echo "${de_map[$choice]}"
+        else
+            echo "Неверный выбор" >&2
+            return 1
+        fi
+    fi
+}
+
+# Получение URL для скачивания
+get_download_url() {
+    local distro="$1"
+    local version="$2"
+    local de="${3:-}"
+    
+    if [[ -n "$de" ]]; then
+        jq -r ".distros.$distro.versions.$version.desktop_environments.$de.iso_url" "$CONFIG_FILE"
+    else
+        jq -r ".distros.$distro.versions.$version.iso_url" "$CONFIG_FILE"
+    fi
+}
+
+# Скачивание ISO
+download_iso() {
+    local url="$1"
+    local filename="$2"
+    local filepath="$DOWNLOAD_DIR/$filename"
+    
+    # Создаем директорию если не существует
+    mkdir -p "$DOWNLOAD_DIR"
+    
+    echo "Скачивание: $url"
+    echo "Сохранение в: $filepath"
+    
+    if command -v curl &>/dev/null; then
+        curl -L -o "$filepath" "$url" --progress-bar
+    elif command -v wget &>/dev/null; then
+        wget -O "$filepath" "$url" --progress=bar
+    else
+        echo "Ошибка: отсутствуют curl и wget" >&2
+        return 1
+    fi
+    
+    if [[ -f "$filepath" ]]; then
+        echo "Скачивание завершено: $filepath"
+        echo "$filepath"
+    else
+        echo "Ошибка скачивания" >&2
+        return 1
+    fi
+}
+
+# Проверка наличия Ventoy CLI
+check_ventoy_cli() {
+    if ! command -v ventoy &>/dev/null; then
+        echo "Warning: ventoy CLI не обнаружен в PATH. Установка Ventoy невозможна." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Запись ISO
+write_iso() {
+    local iso_path="$1"
+    local device="$2"
+    local method="$3"
+    
+    case "$method" in
+    dd)
+        echo "Записываю ISO на /dev/$device с помощью dd..."
+        sudo dd bs=4M if="$iso_path" of="/dev/$device" status=progress oflag=sync
+        ;;
+    ventoy)
+        check_ventoy_cli || return 1
+        
+        # Установка Ventoy если нет
+        if ! ventoy -l "/dev/$device" &>/dev/null; then
+            echo "Устанавливаю Ventoy на /dev/$device..."
+            sudo ventoy -i "/dev/$device"
+        fi
+        
+        # Монтируем первый раздел
+        local mp="$MOUNT_BASE/$device"
+        sudo mkdir -p "$mp"
+        sudo umount "/dev/${device}1" 2>/dev/null || true
+        sudo mount -o rw "/dev/${device}1" "$mp"
+        
+        echo "Копирую ISO в $mp..."
+        sudo cp "$iso_path" "$mp/"
+        
+        echo "Размонтирую..."
+        sudo umount "$mp"
+        sudo rmdir "$mp"
+        ;;
+    *)
+        echo "Неизвестный метод '$method'" >&2
+        return 1
+        ;;
+    esac
+}
+
+# Основная функция
+main() {
+    local iso_path="" device="" method=""
+    local no_confirm=false download_only=false
+    
+    check_dependencies
+    load_distros_config
+    
+    # Парсинг опций
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            print_help
+            exit 0
+            ;;
+        -i | --iso)
+            iso_path="$2"
+            shift 2
+            ;;
+        -d | --device)
+            device="${2#/dev/}"
+            shift 2
+            ;;
+        -m | --method)
+            method="$2"
+            shift 2
+            ;;
+        --no-confirm)
+            no_confirm=true
+            shift
+            ;;
+        --list-distros)
+            list_distros
+            exit 0
+            ;;
+        --download-only)
+            download_only=true
+            shift
+            ;;
+        *)
+            echo "Неизвестная опция: $1" >&2
+            exit 1
+            ;;
+        esac
+    done
+    
+    # Если не указан локальный ISO, выбираем дистрибутив
+    if [[ -z "$iso_path" ]]; then
+        echo "=== Выбор дистрибутива ==="
+        local distro version de=""
+        
+        distro=$(choose_distro)
+        echo "Выбран дистрибутив: $(jq -r ".distros.$distro.name" "$CONFIG_FILE")"
+        
+        version=$(choose_version "$distro")
+        echo "Выбрана версия: $version"
+        
+        de=$(choose_desktop_environment "$distro" "$version")
+        if [[ -n "$de" ]]; then
+            echo "Выбран рабочий стол: $de"
+        fi
+        
+        # Получаем URL и скачиваем
+        local download_url filename
+        download_url=$(get_download_url "$distro" "$version" "$de")
+        filename=$(basename "$download_url")
+        
+        echo
+        echo "=== Скачивание ISO ==="
+        iso_path=$(download_iso "$download_url" "$filename")
+    fi
+    
+    # Проверяем существование ISO
+    if [[ ! -f "$iso_path" ]]; then
+        echo "Ошибка: ISO не найден '$iso_path'" >&2
+        exit 1
+    fi
+    
+    # Если только скачивание, завершаем
+    if [[ "$download_only" == true ]]; then
+        echo "Скачивание завершено: $iso_path"
+        exit 0
+    fi
+    
+    echo
+    echo "=== Запись на устройство ==="
+    
+    # Выбор устройства
+    if [[ -z "$device" ]]; then
+        device=$(choose_device)
+    fi
+    
+    # Проверка устройства
+    if [[ ! -b "/dev/$device" ]]; then
+        echo "Ошибка: устройство '/dev/$device' не существует" >&2
+        exit 1
+    fi
+    
+    # Выбор метода записи
+    if [[ -z "$method" ]]; then
+        echo "Выберите метод записи:"
+        echo "1) dd (прямая запись образа)"
+        echo "2) ventoy (установка Ventoy + копирование ISO)"
+        read -rp "Введите 1 или 2: " method_choice
+        
+        case "$method_choice" in
+        1) method="dd" ;;
+        2) method="ventoy" ;;
+        *)
+            echo "Неверный выбор" >&2
+            exit 1
+            ;;
+        esac
+    fi
+    
+    # Подтверждение
+    if [[ "$no_confirm" != true ]]; then
+        echo
+        echo "ISO: $(basename "$iso_path")"
+        echo "Устройство: /dev/$device"
+        echo "Метод: $method"
+        echo
+        confirm "Выполнить запись? ВСЕ ДАННЫЕ НА УСТРОЙСТВЕ БУДУТ УДАЛЕНЫ!" || {
+            echo "Отменено пользователем"
+            exit 0
+        }
+    fi
+    
+    # Выполнение записи
+    echo
+    echo "=== Запись ISO ==="
+    write_iso "$iso_path" "$device" "$method"
+    
+    echo
+    echo "✅ Готово! ISO записан на /dev/$device"
+    
+    # Дополнительная информация
+    echo
+    echo "Устройство готово к использованию."
+    case "$method" in
+    dd)
+        echo "Для загрузки установите /dev/$device как загрузочное устройство в BIOS/UEFI."
+        ;;
+    ventoy)
+        echo "Ventoy установлен. Вы можете скопировать дополнительные ISO в раздел Ventoy."
+        ;;
+    esac
+}
+
+main "$@"

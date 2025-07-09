@@ -1,0 +1,154 @@
+{
+  "distros": {
+    "arch": {
+      "name": "Arch Linux",
+      "versions": {
+        "latest": {
+          "url": "https://archlinux.org/download/",
+          "iso_url": "https://mirror.rackspace.com/archlinux/iso/latest/archlinux-x86_64.iso",
+          "description": "Arch Linux (latest)"
+        }
+      }
+    },
+    "debian": {
+      "name": "Debian",
+      "versions": {
+        "12": {
+          "url": "https://www.debian.org/distrib/",
+          "iso_url": "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.8.0-amd64-netinst.iso",
+          "description": "Debian 12 (Bookworm)"
+        }
+      }
+    },
+    "ubuntu": {
+      "name": "Ubuntu",
+      "versions": {
+        "24.04": {
+          "url": "https://ubuntu.com/download/desktop",
+          "iso_url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.1-desktop-amd64.iso",
+          "description": "Ubuntu 24.04 LTS"
+        },
+        "22.04": {
+          "url": "https://ubuntu.com/download/desktop",
+          "iso_url": "https://releases.ubuntu.com/22.04/ubuntu-22.04.5-desktop-amd64.iso",
+          "description": "Ubuntu 22.04 LTS"
+        }
+      }
+    },
+    "kali": {
+      "name": "Kali Linux",
+      "versions": {
+        "latest": {
+          "url": "https://www.kali.org/get-kali/",
+          "iso_url": "https://cdimage.kali.org/kali-2024.4/kali-linux-2024.4-installer-amd64.iso",
+          "description": "Kali Linux (latest)"
+        }
+      }
+    },
+    "endeavouros": {
+      "name": "EndeavourOS",
+      "versions": {
+        "latest": {
+          "url": "https://endeavouros.com/download/",
+          "iso_url": "https://github.com/endeavouros-team/ISO/releases/latest/download/endeavouros-x86_64.iso",
+          "description": "EndeavourOS (latest)"
+        }
+      }
+    },
+    "fedora": {
+      "name": "Fedora",
+      "versions": {
+        "40": {
+          "url": "https://getfedora.org/",
+          "iso_url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-40-1.14.iso",
+          "description": "Fedora 40 Workstation"
+        }
+      }
+    },
+    "mint": {
+      "name": "Linux Mint",
+      "versions": {
+        "22": {
+          "desktop_environments": {
+            "cinnamon": {
+              "iso_url": "https://mirrors.layeronline.com/linuxmint/stable/22/linuxmint-22-cinnamon-64bit.iso",
+              "description": "Linux Mint 22 Cinnamon"
+            },
+            "mate": {
+              "iso_url": "https://mirrors.layeronline.com/linuxmint/stable/22/linuxmint-22-mate-64bit.iso",
+              "description": "Linux Mint 22 MATE"
+            },
+            "xfce": {
+              "iso_url": "https://mirrors.layeronline.com/linuxmint/stable/22/linuxmint-22-xfce-64bit.iso",
+              "description": "Linux Mint 22 Xfce"
+            }
+          },
+          "url": "https://linuxmint.com/download.php",
+          "description": "Linux Mint 22"
+        }
+      }
+    },
+    "manjaro": {
+      "name": "Manjaro",
+      "versions": {
+        "latest": {
+          "desktop_environments": {
+            "kde": {
+              "iso_url": "https://download.manjaro.org/kde/24.2.0/manjaro-kde-24.2.0-241210-linux69.iso",
+              "description": "Manjaro KDE Plasma"
+            },
+            "gnome": {
+              "iso_url": "https://download.manjaro.org/gnome/24.2.0/manjaro-gnome-24.2.0-241210-linux69.iso",
+              "description": "Manjaro GNOME"
+            },
+            "xfce": {
+              "iso_url": "https://download.manjaro.org/xfce/24.2.0/manjaro-xfce-24.2.0-241210-linux69.iso",
+              "description": "Manjaro Xfce"
+            }
+          },
+          "url": "https://manjaro.org/download/",
+          "description": "Manjaro (latest)"
+        }
+      }
+    },
+    "zorin": {
+      "name": "Zorin OS",
+      "versions": {
+        "17": {
+          "url": "https://zorin.com/os/download/",
+          "iso_url": "https://zorin.com/os/download/17/core/",
+          "description": "Zorin OS 17 Core"
+        }
+      }
+    },
+    "elementary": {
+      "name": "elementary OS",
+      "versions": {
+        "8": {
+          "url": "https://elementary.io/",
+          "iso_url": "https://ams3.dl.elementary.io/download/MTczNTQ0NzYxMg==/elementaryos-8.0-stable.20241210.iso",
+          "description": "elementary OS 8"
+        }
+      }
+    },
+    "pop": {
+      "name": "Pop!_OS",
+      "versions": {
+        "22.04": {
+          "desktop_environments": {
+            "nvidia": {
+              "iso_url": "https://iso.pop-os.org/22.04/amd64/nvidia/27/pop-os_22.04_amd64_nvidia_27.iso",
+              "description": "Pop!_OS 22.04 (NVIDIA)"
+            },
+            "intel": {
+              "iso_url": "https://iso.pop-os.org/22.04/amd64/intel/27/pop-os_22.04_amd64_intel_27.iso",
+              "description": "Pop!_OS 22.04 (Intel/AMD)"
+            }
+          },
+          "url": "https://pop.system76.com/",
+          "description": "Pop!_OS 22.04"
+        }
+      }
+    }
+  }
+}
