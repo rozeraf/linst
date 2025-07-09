@@ -50,7 +50,7 @@
       "versions": {
         "latest": {
           "url": "https://endeavouros.com/download/",
-          "iso_url": "https://github.com/endeavouros-team/ISO/releases/latest/download/endeavouros-x86_64.iso",
+          "iso_url": "https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso",
           "description": "EndeavourOS (latest)"
         }
       }
