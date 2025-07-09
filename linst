@@ -120,7 +120,7 @@ choose_distro() {
     distros=$(jq -r '.distros | keys[]' "$CONFIG_FILE")
     
     if command -v fzf &>/dev/null; then
-        echo "$distros" | fzf --header="Выберите дистрибутив" --preview="jq -r '.distros.{}.name' '$CONFIG_FILE'"
+        echo "$distros" | fzf --header="Выберите дистрибутив" --preview="jq -r '.distros[\"{}\"].name' '$CONFIG_FILE'"
     else
         echo "Доступные дистрибутивы:"
         local i=1
@@ -128,7 +128,7 @@ choose_distro() {
         
         while IFS= read -r distro; do
             local name
-            name=$(jq -r ".distros.$distro.name" "$CONFIG_FILE")
+            name=$(jq -r ".distros[\"$distro\"].name" "$CONFIG_FILE")
             printf "%2d) %s\n" "$i" "$name"
             distro_map[$i]="$distro"
             ((i++))
@@ -150,7 +150,7 @@ choose_distro() {
 choose_version() {
     local distro="$1"
     local versions
-    versions=$(jq -r ".distros.$distro.versions | keys[]" "$CONFIG_FILE")
+    versions=$(jq -r ".distros[\"$distro\"].versions | keys[]" "$CONFIG_FILE")
     
     if [[ $(echo "$versions" | wc -l) -eq 1 ]]; then
         echo "$versions"
@@ -158,7 +158,7 @@ choose_version() {
     fi
     
     if command -v fzf &>/dev/null; then
-        echo "$versions" | fzf --header="Выберите версию $distro" --preview="jq -r '.distros.$distro.versions.{}.description' '$CONFIG_FILE'"
+        echo "$versions" | fzf --header="Выберите версию $distro" --preview="jq -r '.distros[\"$distro\"].versions[\"{}\"].description' '$CONFIG_FILE'"
     else
         echo "Доступные версии для $distro:"
         local i=1
@@ -166,7 +166,7 @@ choose_version() {
         
         while IFS= read -r version; do
             local desc
-            desc=$(jq -r ".distros.$distro.versions.$version.description" "$CONFIG_FILE")
+            desc=$(jq -r ".distros[\"$distro\"].versions[\"$version\"].description" "$CONFIG_FILE")
             printf "%2d) %s\n" "$i" "$desc"
             version_map[$i]="$version"
             ((i++))
@@ -190,15 +190,15 @@ choose_desktop_environment() {
     local version="$2"
     
     # Проверяем, есть ли desktop_environments
-    if ! jq -e ".distros.$distro.versions.$version.desktop_environments" "$CONFIG_FILE" &>/dev/null; then
+    if ! jq -e ".distros[\"$distro\"].versions[\"$version\"].desktop_environments" "$CONFIG_FILE" &>/dev/null; then
         return 0  # Нет выбора DE
     fi
     
     local des
-    des=$(jq -r ".distros.$distro.versions.$version.desktop_environments | keys[]" "$CONFIG_FILE")
+    des=$(jq -r ".distros[\"$distro\"].versions[\"$version\"].desktop_environments | keys[]" "$CONFIG_FILE")
     
     if command -v fzf &>/dev/null; then
-        echo "$des" | fzf --header="Выберите рабочий стол" --preview="jq -r '.distros.$distro.versions.$version.desktop_environments.{}.description' '$CONFIG_FILE'"
+        echo "$des" | fzf --header="Выберите рабочий стол" --preview="jq -r '.distros[\"$distro\"].versions[\"$version\"].desktop_environments[\"{}\"].description' '$CONFIG_FILE'"
     else
         echo "Доступные рабочие столы:"
         local i=1
@@ -206,7 +206,7 @@ choose_desktop_environment() {
         
         while IFS= read -r de; do
             local desc
-            desc=$(jq -r ".distros.$distro.versions.$version.desktop_environments.$de.description" "$CONFIG_FILE")
+            desc=$(jq -r ".distros[\"$distro\"].versions[\"$version\"].desktop_environments[\"$de\"].description" "$CONFIG_FILE")
             printf "%2d) %s\n" "$i" "$desc"
             de_map[$i]="$de"
             ((i++))
@@ -231,9 +231,9 @@ get_download_url() {
     local de="${3:-}"
     
     if [[ -n "$de" ]]; then
-        jq -r ".distros.$distro.versions.$version.desktop_environments.$de.iso_url" "$CONFIG_FILE"
+        jq -r ".distros[\"$distro\"].versions[\"$version\"].desktop_environments[\"$de\"].iso_url" "$CONFIG_FILE"
     else
-        jq -r ".distros.$distro.versions.$version.iso_url" "$CONFIG_FILE"
+        jq -r ".distros[\"$distro\"].versions[\"$version\"].iso_url" "$CONFIG_FILE"
     fi
 }
 
@@ -316,6 +316,58 @@ write_iso() {
     esac
 }
 
+# Ventoy с прямым скачиванием на устройство
+write_iso_ventoy_direct() {
+    local download_url="$1"
+    local filename="$2"
+    local device="$3"
+    
+    check_ventoy_cli || return 1
+    
+    # Установка Ventoy если нет
+    if ! ventoy -l "/dev/$device" &>/dev/null; then
+        echo "Устанавливаю Ventoy на /dev/$device..."
+        sudo ventoy -i "/dev/$device"
+    fi
+    
+    # Монтируем первый раздел
+    local mp="$MOUNT_BASE/$device"
+    sudo mkdir -p "$mp"
+    sudo umount "/dev/${device}1" 2>/dev/null || true
+    sudo mount -o rw "/dev/${device}1" "$mp"
+    
+    echo "Скачиваю ISO прямо на устройство: $download_url"
+    
+    # Скачиваем прямо на устройство
+    if command -v curl &>/dev/null; then
+        sudo curl -L -o "$mp/$filename" "$download_url" --progress-bar
+    elif command -v wget &>/dev/null; then
+        sudo wget -O "$mp/$filename" "$download_url" --progress=bar
+    else
+        echo "Ошибка: отсутствуют curl и wget" >&2
+        sudo umount "$mp"
+        sudo rmdir "$mp"
+        return 1
+    fi
+    
+    # Проверяем, что файл скачался
+    if [[ -f "$mp/$filename" ]]; then
+        echo "Скачивание завершено: $mp/$filename"
+        local file_size
+        file_size=$(sudo du -h "$mp/$filename" | cut -f1)
+        echo "Размер файла: $file_size"
+    else
+        echo "Ошибка: файл не скачался" >&2
+        sudo umount "$mp"
+        sudo rmdir "$mp"
+        return 1
+    fi
+    
+    echo "Размонтирую..."
+    sudo umount "$mp"
+    sudo rmdir "$mp"
+}
+
 # Основная функция
 main() {
     local iso_path="" device="" method=""
@@ -368,7 +420,7 @@ main() {
         local distro version de=""
         
         distro=$(choose_distro)
-        echo "Выбран дистрибутив: $(jq -r ".distros.$distro.name" "$CONFIG_FILE")"
+        echo "Выбран дистрибутив: $(jq -r ".distros[\"$distro\"].name" "$CONFIG_FILE")"
         
         version=$(choose_version "$distro")
         echo "Выбрана версия: $version"
@@ -378,76 +430,181 @@ main() {
             echo "Выбран рабочий стол: $de"
         fi
         
-        # Получаем URL и скачиваем
+        # Получаем URL для скачивания
         local download_url filename
         download_url=$(get_download_url "$distro" "$version" "$de")
         filename=$(basename "$download_url")
         
         echo
-        echo "=== Скачивание ISO ==="
-        iso_path=$(download_iso "$download_url" "$filename")
-    fi
-    
-    # Проверяем существование ISO
-    if [[ ! -f "$iso_path" ]]; then
-        echo "Ошибка: ISO не найден '$iso_path'" >&2
-        exit 1
-    fi
-    
-    # Если только скачивание, завершаем
-    if [[ "$download_only" == true ]]; then
-        echo "Скачивание завершено: $iso_path"
-        exit 0
-    fi
-    
-    echo
-    echo "=== Запись на устройство ==="
-    
-    # Выбор устройства
-    if [[ -z "$device" ]]; then
-        device=$(choose_device)
-    fi
-    
-    # Проверка устройства
-    if [[ ! -b "/dev/$device" ]]; then
-        echo "Ошибка: устройство '/dev/$device' не существует" >&2
-        exit 1
-    fi
-    
-    # Выбор метода записи
-    if [[ -z "$method" ]]; then
-        echo "Выберите метод записи:"
-        echo "1) dd (прямая запись образа)"
-        echo "2) ventoy (установка Ventoy + копирование ISO)"
-        read -rp "Введите 1 или 2: " method_choice
+        echo "=== Выбор метода записи ==="
         
-        case "$method_choice" in
-        1) method="dd" ;;
-        2) method="ventoy" ;;
-        *)
-            echo "Неверный выбор" >&2
+        # Выбор метода записи
+        if [[ -z "$method" ]]; then
+            echo "Выберите метод записи:"
+            echo "1) dd (скачать на ПК, затем записать)"
+            echo "2) ventoy (скачать прямо на устройство Ventoy)"
+            read -rp "Введите 1 или 2: " method_choice
+            
+            case "$method_choice" in
+            1) method="dd" ;;
+            2) method="ventoy" ;;
+            *)
+                echo "Неверный выбор" >&2
+                exit 1
+                ;;
+            esac
+        fi
+        
+        if [[ "$method" == "ventoy" ]]; then
+            # Для Ventoy: сначала выбираем устройство, потом скачиваем прямо туда
+            echo
+            echo "=== Выбор устройства ==="
+            
+            if [[ -z "$device" ]]; then
+                device=$(choose_device)
+            fi
+            
+            # Проверка устройства
+            if [[ ! -b "/dev/$device" ]]; then
+                echo "Ошибка: устройство '/dev/$device' не существует" >&2
+                exit 1
+            fi
+            
+            # Подтверждение для Ventoy
+            if [[ "$no_confirm" != true ]]; then
+                echo
+                echo "Дистрибутив: $(jq -r ".distros[\"$distro\"].name" "$CONFIG_FILE") $version"
+                if [[ -n "$de" ]]; then
+                    echo "Рабочий стол: $de"
+                fi
+                echo "Устройство: /dev/$device"
+                echo "Метод: Ventoy (скачивание прямо на устройство)"
+                echo
+                confirm "Выполнить установку Ventoy и скачивание ISO?" || {
+                    echo "Отменено пользователем"
+                    exit 0
+                }
+            fi
+            
+            # Выполнение Ventoy
+            echo
+            echo "=== Установка Ventoy и скачивание ISO ==="
+            write_iso_ventoy_direct "$download_url" "$filename" "$device"
+            
+        else
+            # Для dd: сначала скачиваем на ПК
+            echo
+            echo "=== Скачивание ISO ==="
+            iso_path=$(download_iso "$download_url" "$filename")
+            
+            # Проверяем существование ISO
+            if [[ ! -f "$iso_path" ]]; then
+                echo "Ошибка: ISO не найден '$iso_path'" >&2
+                exit 1
+            fi
+            
+            # Если только скачивание, завершаем
+            if [[ "$download_only" == true ]]; then
+                echo "Скачивание завершено: $iso_path"
+                exit 0
+            fi
+            
+            echo
+            echo "=== Выбор устройства ==="
+            
+            # Выбор устройства
+            if [[ -z "$device" ]]; then
+                device=$(choose_device)
+            fi
+            
+            # Проверка устройства
+            if [[ ! -b "/dev/$device" ]]; then
+                echo "Ошибка: устройство '/dev/$device' не существует" >&2
+                exit 1
+            fi
+            
+            # Подтверждение для dd
+            if [[ "$no_confirm" != true ]]; then
+                echo
+                echo "ISO: $(basename "$iso_path")"
+                echo "Устройство: /dev/$device"
+                echo "Метод: dd (прямая запись)"
+                echo
+                confirm "Выполнить запись? ВСЕ ДАННЫЕ НА УСТРОЙСТВЕ БУДУТ УДАЛЕНЫ!" || {
+                    echo "Отменено пользователем"
+                    exit 0
+                }
+            fi
+            
+            # Выполнение записи dd
+            echo
+            echo "=== Запись ISO ==="
+            write_iso "$iso_path" "$device" "$method"
+        fi
+        
+    else
+        # Локальный ISO - старая логика
+        # Проверяем существование ISO
+        if [[ ! -f "$iso_path" ]]; then
+            echo "Ошибка: ISO не найден '$iso_path'" >&2
             exit 1
-            ;;
-        esac
-    fi
-    
-    # Подтверждение
-    if [[ "$no_confirm" != true ]]; then
+        fi
+        
+        # Если только скачивание, завершаем (не имеет смысла для локального ISO)
+        if [[ "$download_only" == true ]]; then
+            echo "Опция --download-only не применима для локального ISO"
+            exit 1
+        fi
+        
         echo
-        echo "ISO: $(basename "$iso_path")"
-        echo "Устройство: /dev/$device"
-        echo "Метод: $method"
+        echo "=== Запись локального ISO ==="
+        
+        # Выбор устройства
+        if [[ -z "$device" ]]; then
+            device=$(choose_device)
+        fi
+        
+        # Проверка устройства
+        if [[ ! -b "/dev/$device" ]]; then
+            echo "Ошибка: устройство '/dev/$device' не существует" >&2
+            exit 1
+        fi
+        
+        # Выбор метода записи
+        if [[ -z "$method" ]]; then
+            echo "Выберите метод записи:"
+            echo "1) dd (прямая запись образа)"
+            echo "2) ventoy (установка Ventoy + копирование ISO)"
+            read -rp "Введите 1 или 2: " method_choice
+            
+            case "$method_choice" in
+            1) method="dd" ;;
+            2) method="ventoy" ;;
+            *)
+                echo "Неверный выбор" >&2
+                exit 1
+                ;;
+            esac
+        fi
+        
+        # Подтверждение
+        if [[ "$no_confirm" != true ]]; then
+            echo
+            echo "ISO: $(basename "$iso_path")"
+            echo "Устройство: /dev/$device"
+            echo "Метод: $method"
+            echo
+            confirm "Выполнить запись? ВСЕ ДАННЫЕ НА УСТРОЙСТВЕ БУДУТ УДАЛЕНЫ!" || {
+                echo "Отменено пользователем"
+                exit 0
+            }
+        fi
+        
+        # Выполнение записи
         echo
-        confirm "Выполнить запись? ВСЕ ДАННЫЕ НА УСТРОЙСТВЕ БУДУТ УДАЛЕНЫ!" || {
-            echo "Отменено пользователем"
-            exit 0
-        }
+        echo "=== Запись ISO ==="
+        write_iso "$iso_path" "$device" "$method"
     fi
-    
-    # Выполнение записи
-    echo
-    echo "=== Запись ISO ==="
-    write_iso "$iso_path" "$device" "$method"
     
     echo
     echo "✅ Готово! ISO записан на /dev/$device"
@@ -461,6 +618,7 @@ main() {
         ;;
     ventoy)
         echo "Ventoy установлен. Вы можете скопировать дополнительные ISO в раздел Ventoy."
+        echo "Для добавления новых ISO просто скопируйте их в корень устройства."
         ;;
     esac
 }
