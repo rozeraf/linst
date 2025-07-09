@@ -14,6 +14,64 @@ CONFIG_FILE="${BASH_SOURCE%/*}/distros.json"
 DOWNLOAD_DIR="${HOME}/Downloads"
 # ==========================
 
+# Глобальные переменные для cleanup
+MOUNTED_PATH=""
+LOCK_FILE=""
+
+# Cleanup функция для аварийного завершения
+cleanup() {
+    if [[ -n "$MOUNTED_PATH" && -d "$MOUNTED_PATH" ]]; then
+        echo "Экстренное размонтирование: $MOUNTED_PATH"
+        safe_unmount "$MOUNTED_PATH"
+    fi
+    
+    if [[ -n "$LOCK_FILE" && -f "$LOCK_FILE" ]]; then
+        rm -f "$LOCK_FILE"
+    fi
+}
+
+# Установка trap для cleanup
+trap cleanup EXIT INT TERM
+
+# Валидация имени устройства
+validate_device() {
+    local device="$1"
+    
+    # Разрешены только буквы, цифры, подчеркивания
+    if [[ ! "$device" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        echo "Ошибка: недопустимое имя устройства '$device'" >&2
+        return 1
+    fi
+    
+    # Проверка что устройство существует
+    if [[ ! -b "/dev/$device" ]]; then
+        echo "Ошибка: устройство '/dev/$device' не существует" >&2
+        return 1
+    fi
+    
+    # Предупреждение о системных дисках
+    if [[ "$device" =~ ^(sda|nvme0n1)$ ]]; then
+        echo "⚠️  ВНИМАНИЕ: '$device' может быть системным диском!"
+        echo "Убедитесь, что выбрали правильное устройство!"
+        confirm "Продолжить с устройством $device? Это может быть опасно!" || return 1
+    fi
+    
+    return 0
+}
+
+# Создание lock-файла
+create_lock() {
+    local device="$1"
+    LOCK_FILE="/tmp/linst.$device.lock"
+    
+    if [[ -f "$LOCK_FILE" ]]; then
+        echo "Ошибка: устройство $device уже используется другим процессом linst" >&2
+        return 1
+    fi
+    
+    echo $$ > "$LOCK_FILE"
+}
+
 # Проверка зависимостей
 check_dependencies() {
     local deps=("jq" "lsblk" "dd")
@@ -95,7 +153,8 @@ confirm() {
 # Список устройств и выбор
 choose_device() {
     local list
-    list=$(lsblk -d -o NAME,SIZE,LABEL,MODEL | grep '^sd' || true)
+    # Поддержка SD, NVMe, MMC устройств
+    list=$(lsblk -d -o NAME,SIZE,LABEL,MODEL | awk '$2 ~ /^[0-9]+.*[KMGT]?$/ && $1 ~ /^(sd|nvme|mmcblk)[a-z0-9]*$/ {print}' || true)
     
     if [[ -z "$list" ]]; then
         echo "Нет доступных устройств" >&2
@@ -103,13 +162,13 @@ choose_device() {
     fi
     
     if command -v fzf &>/dev/null; then
-        echo "$list" | fzf --header="Выберите устройство для записи" --preview="echo {}" | \
+        echo "$list" | fzf --header="Выберите устройство для записи" --preview="echo 'Устройство: {}'" | \
             awk '{print $1}'
     else
         echo "Доступные устройства:"
         echo "$list"
         echo
-        read -rp "Введите имя устройства (например sdd): " dev
+        read -rp "Введите имя устройства (например sdd, nvme0n1): " dev
         echo "$dev"
     fi
 }
@@ -120,7 +179,7 @@ choose_distro() {
     distros=$(jq -r '.distros | keys[]' "$CONFIG_FILE")
     
     if command -v fzf &>/dev/null; then
-        echo "$distros" | fzf --header="Выберите дистрибутив" --preview="jq -r '.distros[\"{}\"].name' '$CONFIG_FILE'"
+        echo "$distros" | fzf --header="Выберите дистрибутив" --preview="echo 'Дистрибутив: {}'"
     else
         echo "Доступные дистрибутивы:"
         local i=1
@@ -158,7 +217,7 @@ choose_version() {
     fi
     
     if command -v fzf &>/dev/null; then
-        echo "$versions" | fzf --header="Выберите версию $distro" --preview="jq -r '.distros[\"$distro\"].versions[\"{}\"].description' '$CONFIG_FILE'"
+        echo "$versions" | fzf --header="Выберите версию $distro" --preview="echo 'Версия: {}'"
     else
         echo "Доступные версии для $distro:"
         local i=1
@@ -198,7 +257,7 @@ choose_desktop_environment() {
     des=$(jq -r ".distros[\"$distro\"].versions[\"$version\"].desktop_environments | keys[]" "$CONFIG_FILE")
     
     if command -v fzf &>/dev/null; then
-        echo "$des" | fzf --header="Выберите рабочий стол" --preview="jq -r '.distros[\"$distro\"].versions[\"$version\"].desktop_environments[\"{}\"].description' '$CONFIG_FILE'"
+        echo "$des" | fzf --header="Выберите рабочий стол" --preview="echo 'Рабочий стол: {}'"
     else
         echo "Доступные рабочие столы:"
         local i=1
@@ -249,20 +308,31 @@ download_iso() {
     echo "Скачивание: $url"
     echo "Сохранение в: $filepath"
     
+    # Удаляем частичный файл если существует
+    [[ -f "$filepath" ]] && rm -f "$filepath"
+    
+    local download_success=false
     if command -v curl &>/dev/null; then
-        curl -L -o "$filepath" "$url" --progress-bar
+        if curl -L -o "$filepath" "$url" --progress-bar --retry 3 --retry-delay 2; then
+            download_success=true
+        fi
     elif command -v wget &>/dev/null; then
-        wget -O "$filepath" "$url" --progress=bar
+        if wget -O "$filepath" "$url" --progress=bar --tries=3 --retry-connrefused; then
+            download_success=true
+        fi
     else
         echo "Ошибка: отсутствуют curl и wget" >&2
         return 1
     fi
     
-    if [[ -f "$filepath" ]]; then
-        echo "Скачивание завершено: $filepath"
+    if [[ "$download_success" == true && -s "$filepath" ]]; then
+        local file_size
+        file_size=$(du -h "$filepath" | cut -f1)
+        echo "Скачивание завершено: $filepath (размер: $file_size)"
         echo "$filepath"
     else
-        echo "Ошибка скачивания" >&2
+        echo "Ошибка скачивания или файл пуст" >&2
+        [[ -f "$filepath" ]] && rm -f "$filepath"
         return 1
     fi
 }
@@ -276,6 +346,57 @@ check_ventoy_cli() {
     return 0
 }
 
+# Безопасное размонтирование
+safe_unmount() {
+    local mp="$1"
+    
+    echo "Синхронизация данных..."
+    sudo sync
+    
+    echo "Размонтирую $mp..."
+    
+    # Попытка обычного размонтирования
+    if sudo umount "$mp" 2>/dev/null; then
+        echo "Размонтирование успешно"
+    else
+        echo "Обычное размонтирование не удалось, пробую принудительное..."
+        
+        # Ждем немного и пробуем снова
+        sleep 2
+        sudo sync
+        
+        if sudo umount "$mp" 2>/dev/null; then
+            echo "Размонтирование успешно"
+        else
+            echo "Принудительное размонтирование..."
+            if sudo umount -f "$mp" 2>/dev/null; then
+                echo "Принудительное размонтирование успешно"
+            else
+                echo "Ленивое размонтирование..."
+                sudo umount -l "$mp" 2>/dev/null || true
+                echo "Ленивое размонтирование выполнено"
+            fi
+        fi
+    fi
+    
+    # Удаляем директорию точки монтирования
+    if [[ -d "$mp" ]]; then
+        sudo rmdir "$mp" 2>/dev/null || true
+    fi
+}
+
+# Получение раздела для Ventoy
+get_ventoy_partition() {
+    local device="$1"
+    
+    # Для NVMe устройств используем p1, для остальных - 1
+    if [[ "$device" =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+        echo "${device}p1"
+    else
+        echo "${device}1"
+    fi
+}
+
 # Запись ISO
 write_iso() {
     local iso_path="$1"
@@ -285,7 +406,10 @@ write_iso() {
     case "$method" in
     dd)
         echo "Записываю ISO на /dev/$device с помощью dd..."
-        sudo dd bs=4M if="$iso_path" of="/dev/$device" status=progress oflag=sync
+        sudo dd bs=1M if="$iso_path" of="/dev/$device" status=progress conv=fsync
+        echo "Синхронизация данных..."
+        sudo sync
+        echo "Запись завершена"
         ;;
     ventoy)
         check_ventoy_cli || return 1
@@ -296,18 +420,37 @@ write_iso() {
             sudo ventoy -i "/dev/$device"
         fi
         
+        # Определяем раздел для Ventoy
+        local ventoy_partition
+        ventoy_partition=$(get_ventoy_partition "$device")
+        
         # Монтируем первый раздел
         local mp="$MOUNT_BASE/$device"
         sudo mkdir -p "$mp"
-        sudo umount "/dev/${device}1" 2>/dev/null || true
-        sudo mount -o rw "/dev/${device}1" "$mp"
+        MOUNTED_PATH="$mp"
+        
+        # Размонтируем если уже смонтирован
+        sudo umount "/dev/$ventoy_partition" 2>/dev/null || true
+        sudo umount "$mp" 2>/dev/null || true
+        
+        # Ждем немного чтобы устройство было готово
+        sleep 1
+        
+        echo "Монтирую /dev/$ventoy_partition в $mp..."
+        if ! sudo mount -o rw "/dev/$ventoy_partition" "$mp"; then
+            echo "Ошибка: не удалось смонтировать /dev/$ventoy_partition" >&2
+            sudo rmdir "$mp" 2>/dev/null || true
+            MOUNTED_PATH=""
+            return 1
+        fi
         
         echo "Копирую ISO в $mp..."
         sudo cp "$iso_path" "$mp/"
+        sudo sync
         
-        echo "Размонтирую..."
-        sudo umount "$mp"
-        sudo rmdir "$mp"
+        # Безопасное размонтирование
+        safe_unmount "$mp"
+        MOUNTED_PATH=""
         ;;
     *)
         echo "Неизвестный метод '$method'" >&2
@@ -330,42 +473,71 @@ write_iso_ventoy_direct() {
         sudo ventoy -i "/dev/$device"
     fi
     
+    # Определяем раздел для Ventoy
+    local ventoy_partition
+    ventoy_partition=$(get_ventoy_partition "$device")
+    
     # Монтируем первый раздел
     local mp="$MOUNT_BASE/$device"
     sudo mkdir -p "$mp"
-    sudo umount "/dev/${device}1" 2>/dev/null || true
-    sudo mount -o rw "/dev/${device}1" "$mp"
+    MOUNTED_PATH="$mp"
+    
+    # Размонтируем если уже смонтирован
+    sudo umount "/dev/$ventoy_partition" 2>/dev/null || true
+    sudo umount "$mp" 2>/dev/null || true
+    
+    # Ждем немного чтобы устройство было готово
+    sleep 1
+    
+    echo "Монтирую /dev/$ventoy_partition в $mp..."
+    if ! sudo mount -o rw "/dev/$ventoy_partition" "$mp"; then
+        echo "Ошибка: не удалось смонтировать /dev/$ventoy_partition" >&2
+        sudo rmdir "$mp" 2>/dev/null || true
+        MOUNTED_PATH=""
+        return 1
+    fi
     
     echo "Скачиваю ISO прямо на устройство: $download_url"
     
-    # Скачиваем прямо на устройство
+    # Скачиваем прямо на устройство с временным файлом
+    local temp_file="$mp/.${filename}.tmp"
+    local download_success=false
+    
     if command -v curl &>/dev/null; then
-        sudo curl -L -o "$mp/$filename" "$download_url" --progress-bar
+        if sudo curl -L -o "$temp_file" "$download_url" --progress-bar --retry 3 --retry-delay 2; then
+            download_success=true
+        fi
     elif command -v wget &>/dev/null; then
-        sudo wget -O "$mp/$filename" "$download_url" --progress=bar
+        if sudo wget -O "$temp_file" "$download_url" --progress=bar --tries=3 --retry-connrefused; then
+            download_success=true
+        fi
     else
         echo "Ошибка: отсутствуют curl и wget" >&2
-        sudo umount "$mp"
-        sudo rmdir "$mp"
+        safe_unmount "$mp"
+        MOUNTED_PATH=""
         return 1
     fi
     
-    # Проверяем, что файл скачался
-    if [[ -f "$mp/$filename" ]]; then
-        echo "Скачивание завершено: $mp/$filename"
+    # Проверяем, что файл скачался и не пуст
+    if [[ "$download_success" == true && -s "$temp_file" ]]; then
+        echo "Переименование файла..."
+        sudo mv "$temp_file" "$mp/$filename"
+        sudo sync
+        
         local file_size
         file_size=$(sudo du -h "$mp/$filename" | cut -f1)
-        echo "Размер файла: $file_size"
+        echo "Скачивание завершено: $mp/$filename (размер: $file_size)"
     else
-        echo "Ошибка: файл не скачался" >&2
-        sudo umount "$mp"
-        sudo rmdir "$mp"
+        echo "Ошибка скачивания или файл пуст" >&2
+        [[ -f "$temp_file" ]] && sudo rm -f "$temp_file"
+        safe_unmount "$mp"
+        MOUNTED_PATH=""
         return 1
     fi
     
-    echo "Размонтирую..."
-    sudo umount "$mp"
-    sudo rmdir "$mp"
+    # Безопасное размонтирование
+    safe_unmount "$mp"
+    MOUNTED_PATH=""
 }
 
 # Основная функция
@@ -389,6 +561,7 @@ main() {
             ;;
         -d | --device)
             device="${2#/dev/}"
+            validate_device "$device" || exit 1
             shift 2
             ;;
         -m | --method)
@@ -464,11 +637,11 @@ main() {
                 device=$(choose_device)
             fi
             
-            # Проверка устройства
-            if [[ ! -b "/dev/$device" ]]; then
-                echo "Ошибка: устройство '/dev/$device' не существует" >&2
-                exit 1
-            fi
+            # Валидация устройства
+            validate_device "$device" || exit 1
+            
+            # Создание lock-файла
+            create_lock "$device" || exit 1
             
             # Подтверждение для Ventoy
             if [[ "$no_confirm" != true ]]; then
@@ -517,11 +690,11 @@ main() {
                 device=$(choose_device)
             fi
             
-            # Проверка устройства
-            if [[ ! -b "/dev/$device" ]]; then
-                echo "Ошибка: устройство '/dev/$device' не существует" >&2
-                exit 1
-            fi
+            # Валидация устройства
+            validate_device "$device" || exit 1
+            
+            # Создание lock-файла
+            create_lock "$device" || exit 1
             
             # Подтверждение для dd
             if [[ "$no_confirm" != true ]]; then
@@ -564,11 +737,11 @@ main() {
             device=$(choose_device)
         fi
         
-        # Проверка устройства
-        if [[ ! -b "/dev/$device" ]]; then
-            echo "Ошибка: устройство '/dev/$device' не существует" >&2
-            exit 1
-        fi
+        # Валидация устройства
+        validate_device "$device" || exit 1
+        
+        # Создание lock-файла
+        create_lock "$device" || exit 1
         
         # Выбор метода записи
         if [[ -z "$method" ]]; then

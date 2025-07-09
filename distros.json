@@ -94,7 +94,7 @@
         "latest": {
           "desktop_environments": {
             "kde": {
-              "iso_url": "https://download.manjaro.org/kde/24.2.0/manjaro-kde-24.2.0-241210-linux69.iso",
+              "iso_url": "https://download.manjaro.org/kde/25.0.4/manjaro-kde-25.0.4-250623-linux612.iso",
               "description": "Manjaro KDE Plasma"
             },
             "gnome": {
